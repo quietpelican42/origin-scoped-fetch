@@ -27,6 +27,11 @@ before(async () => {
   serverB = http.createServer((req, res) => handlerB(req, res));
   await new Promise((r) => serverB.listen(0, '127.0.0.1', r));
   baseB = `http://localhost:${serverB.address().port}`;
+  // Don't let the test servers (or fetch's keep-alive sockets to them) hold the
+  // process open: on Node 20 the top-level after() hook below is not reached
+  // while they are still referenced, so the run never exits.
+  serverA.unref();
+  serverB.unref();
 });
 after(() => {
   serverA.close();
