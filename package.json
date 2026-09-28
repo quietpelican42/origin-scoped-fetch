@@ -13,10 +13,10 @@
     "http"
   ],
   "license": "MIT",
-  "author": "__AUTHOR__",
+  "author": "kofiadeyemiq",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/__GH_OWNER__/origin-scoped-fetch.git"
+    "url": "git+https://github.com/kofiadeyemiq/origin-scoped-fetch.git"
   },
   "type": "module",
   "engines": {
