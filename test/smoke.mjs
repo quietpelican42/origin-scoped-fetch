@@ -90,3 +90,38 @@ test("redirect: 'manual' returns the raw redirect without following it", async (
   const res = await originScopedFetch(baseA, { redirect: 'manual' });
   assert.equal(res.status, 302);
 });
+
+test('a POST Request with a body works as a drop-in replacement for fetch(request)', async () => {
+  let landedBody = '';
+  handlerA = (req, res) => {
+    req.on('data', (c) => (landedBody += c));
+    req.on('end', () => res.writeHead(200).end('ok'));
+  };
+  const req = new Request(`${baseA}/`, { method: 'POST', body: 'hello' });
+  const res = await originScopedFetch(req);
+  assert.equal(res.status, 200);
+  assert.equal(landedBody, 'hello');
+});
+
+test('a 307 straight to another origin keeps content-type and resends the body unscrubbed', async () => {
+  let seenContentType;
+  let seenBody = '';
+  handlerB = (req, res) => {
+    seenContentType = req.headers['content-type'];
+    req.on('data', (c) => (seenBody += c));
+    req.on('end', () => res.end('landed'));
+  };
+  handlerA = (_req, res) => {
+    res.writeHead(307, { location: `${baseB}/` });
+    res.end();
+  };
+  await (
+    await originScopedFetch(baseA, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"x":1}',
+    })
+  ).text();
+  assert.equal(seenContentType, 'application/json');
+  assert.equal(seenBody, '{"x":1}');
+});

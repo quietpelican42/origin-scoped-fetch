@@ -317,6 +317,104 @@ describe('redirect: manual / error pass-through', () => {
   });
 });
 
+describe('Request input', () => {
+  test('a POST Request with a body works as a drop-in replacement for fetch(request)', async () => {
+    let landedBody = '';
+    serveA((req, res) => {
+      req.on('data', (c) => (landedBody += c));
+      req.on('end', () => res.writeHead(200).end('ok'));
+    });
+
+    const req = new Request(`${baseA}/`, { method: 'POST', body: 'hello' });
+    const res = await originScopedFetch(req);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'ok');
+    assert.equal(landedBody, 'hello');
+  });
+
+  test('a POST Request with a body survives a 307 (buffered, so it can be replayed)', async () => {
+    let landedMethod = '';
+    let landedBody = '';
+    serveA((req, res) => {
+      if (new URL(req.url!, baseA).pathname === '/start') {
+        res.writeHead(307, { location: '/landed' });
+        return res.end();
+      }
+      landedMethod = req.method!;
+      req.on('data', (c) => (landedBody += c));
+      req.on('end', () => res.end('ok'));
+    });
+
+    const req = new Request(`${baseA}/start`, { method: 'POST', body: 'replay me' });
+    await (await originScopedFetch(req)).text();
+
+    assert.equal(landedMethod, 'POST');
+    assert.equal(landedBody, 'replay me');
+  });
+
+  test("aborting a Request's own signal aborts originScopedFetch", async () => {
+    serveA((_req, _res) => {
+      /* never respond, so the abort has time to land first */
+    });
+
+    const controller = new AbortController();
+    const req = new Request(`${baseA}/`, { signal: controller.signal });
+    const promise = originScopedFetch(req);
+    controller.abort();
+
+    await assert.rejects(promise);
+  });
+});
+
+describe('cross-origin 307/308 body handling', () => {
+  test('a 307 straight to another origin keeps content-type and resends the body unscrubbed', async () => {
+    let seenContentType: string | undefined;
+    let seenBody = '';
+    serveB((req, res) => {
+      seenContentType = req.headers['content-type'];
+      req.on('data', (c) => (seenBody += c));
+      req.on('end', () => res.end('landed'));
+    });
+    serveA((_req, res) => {
+      res.writeHead(307, { location: `${baseB}/` });
+      res.end();
+    });
+
+    const res = await originScopedFetch(baseA, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
+      body: '{"x":1}',
+    });
+    await res.text();
+
+    assert.equal(seenContentType, 'application/json');
+    assert.equal(seenBody, '{"x":1}');
+  });
+
+  test('authorization is still dropped on a cross-origin 307 even though content-type is kept', async () => {
+    const seenB: http.IncomingHttpHeaders[] = [];
+    serveB((req, res) => {
+      seenB.push(req.headers);
+      res.end('landed');
+    });
+    serveA((_req, res) => {
+      res.writeHead(307, { location: `${baseB}/` });
+      res.end();
+    });
+
+    await (
+      await originScopedFetch(baseA, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', authorization: 'Bearer secret' },
+        body: 'plain body',
+      })
+    ).text();
+
+    assert.equal(seenB[0]!['content-type'], 'text/plain');
+    assert.equal(seenB[0]!.authorization, undefined);
+  });
+});
+
 describe('opaque redirect detection', () => {
   test('a browser-like opaqueredirect response is rejected with a clear error', async () => {
     const browserLikeFetch = (async () =>

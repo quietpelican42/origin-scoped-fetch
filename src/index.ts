@@ -15,6 +15,14 @@ const CROSS_ORIGIN_SAFE_HEADERS = new Set([
 /** Headers dropped whenever a redirect degrades the request to a bodyless GET. */
 const BODY_HEADERS = new Set(['content-type', 'content-length', 'content-encoding']);
 
+/**
+ * Headers that describe the body, not the caller's identity. Kept across an
+ * origin change on 307/308, where the body itself is resent unchanged — the
+ * body is going there anyway, so relabelling it (e.g. to `text/plain` once
+ * `content-type` is gone) would corrupt the request rather than protect it.
+ */
+const BODY_DESCRIBING_HEADERS = new Set(['content-type', 'content-encoding', 'content-language']);
+
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const DEFAULT_MAX_REDIRECTS = 20;
 
@@ -55,21 +63,52 @@ export function createOriginScopedFetch(options: OriginScopedFetchOptions = {}):
       return res;
     }
 
-    // A `Request` input contributes its url/method/headers/body as defaults;
-    // `init` overrides them field by field, same as native `fetch(req, init)`.
-    // Other `Request`-only options (credentials, mode, cache, integrity,
-    // signal) are NOT re-read per hop — pass those via `init` instead.
+    // A `Request` input contributes its url/method/headers/body/signal/etc as
+    // defaults; `init` overrides them field by field, same as native
+    // `fetch(req, init)`. `mode` and `cache` are not carried over — Node's
+    // fetch mostly no-ops `mode`, and re-reading them per hop was not tested.
     const req = input instanceof Request ? input : null;
     let url = new URL(req ? req.url : input.toString());
     let method = (init.method ?? req?.method ?? 'GET').toUpperCase();
     let headers = new Headers(init.headers ?? req?.headers);
-    let body: BodyInit | null = init.body !== undefined ? init.body : (req ? req.body : null);
+
+    // A Request's body is a ReadableStream. Node's fetch requires `duplex:
+    // 'half'` to send one at all (even on the very first hop, with no
+    // redirect involved), and a stream can't be replayed on a 307/308 once
+    // consumed. Buffering it once up front — rather than threading `duplex`
+    // through and still failing to replay on 307/308 — makes a Request with
+    // a body behave as a drop-in replacement for `fetch(request)`.
+    let body: BodyInit | null;
+    if (init.body !== undefined) {
+      body = init.body;
+    } else if (req && req.body !== null) {
+      body = await req.clone().arrayBuffer();
+    } else {
+      body = null;
+    }
+
+    // Only `signal` is verified (see the abort test): aborting a Request's
+    // own signal aborts every hop. `credentials`, `keepalive`, `integrity`
+    // and `referrerPolicy` are forwarded the same way on a best-effort basis
+    // — Node's fetch accepts them without erroring, but behaviour beyond
+    // `signal` was not individually tested.
+    const requestDefaults: RequestInit = req
+      ? {
+          signal: req.signal,
+          credentials: req.credentials,
+          keepalive: req.keepalive,
+          integrity: req.integrity,
+          referrerPolicy: req.referrerPolicy,
+        }
+      : {};
+    const baseInit: RequestInit = { ...requestDefaults, ...init };
+
     let origin = url.origin;
     let hops = 0;
 
     for (let hop = 0; ; hop++) {
       const res = await underlying(url, {
-        ...init,
+        ...baseInit,
         method,
         headers,
         body,
@@ -108,7 +147,12 @@ export function createOriginScopedFetch(options: OriginScopedFetchOptions = {}):
       }
 
       if (url.origin !== origin) {
-        headers = scopeToOrigin(headers, allowCrossOrigin);
+        // On 307/308 the body is resent cross-origin unchanged (the Fetch
+        // spec gives no way to drop it), so the headers describing that body
+        // travel with it too — stripping content-type there would just
+        // relabel the same bytes, not protect anything.
+        const keepBodyHeaders = status === 307 || status === 308;
+        headers = scopeToOrigin(headers, allowCrossOrigin, keepBodyHeaders);
         origin = url.origin;
       }
     }
@@ -124,11 +168,21 @@ function isReadableStream(body: unknown): body is ReadableStream {
   return typeof ReadableStream !== 'undefined' && body instanceof ReadableStream;
 }
 
-/** Drop every header except a small cross-origin-safe allowlist plus the caller's own. */
-function scopeToOrigin(headers: Headers, allow: Set<string>): Headers {
+/**
+ * Drop every header except a small cross-origin-safe allowlist, the caller's
+ * own `allowCrossOriginHeaders`, and — when the body is being resent
+ * cross-origin as-is (307/308) — the headers that describe that body.
+ */
+function scopeToOrigin(headers: Headers, allow: Set<string>, keepBodyHeaders: boolean): Headers {
   const out = new Headers();
   headers.forEach((value, name) => {
-    if (CROSS_ORIGIN_SAFE_HEADERS.has(name) || allow.has(name)) out.set(name, value);
+    if (
+      CROSS_ORIGIN_SAFE_HEADERS.has(name) ||
+      allow.has(name) ||
+      (keepBodyHeaders && BODY_DESCRIBING_HEADERS.has(name))
+    ) {
+      out.set(name, value);
+    }
   });
   return out;
 }

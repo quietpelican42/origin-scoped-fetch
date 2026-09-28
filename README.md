@@ -119,11 +119,20 @@ Followed faithfully to the Fetch spec, on top of Node's manual-redirect fetch:
 - **301, 302 on POST** → method becomes `GET`, body and body-related headers
   (`content-type`, `content-length`, `content-encoding`) are dropped.
 - **303** → method becomes `GET`, except when the original method was `HEAD`.
-- **307, 308** → method and body are preserved unchanged. If the body is a
-  `ReadableStream`, it was already consumed sending the first request and
-  cannot be resent — this throws `UnreplayableRedirectBodyError` rather than
-  silently sending a request with no body or hanging. A `string`, `Buffer`/
-  `TypedArray`, `Blob`, or `FormData` body has no such problem and is resent.
+- **307, 308** → method and body are preserved unchanged, **including across
+  an origin change** — the Fetch spec gives no mechanism to drop the body on
+  307/308, so it is resent to the new origin exactly as given. The headers
+  that describe that body (`content-type`, `content-encoding`,
+  `content-language`) are kept too, even cross-origin: the body is going
+  there either way, and stripping the label without stripping the body would
+  just relabel it, not protect it. Every other header still gets scoped to
+  the new origin as usual. If the body is a `ReadableStream`, it was already
+  consumed sending the first request and cannot be resent — this throws
+  `UnreplayableRedirectBodyError` rather than silently sending a request with
+  no body or hanging. A `string`, `Buffer`/`TypedArray`, `Blob`, or `FormData`
+  body has no such problem and is resent. A `Request` input's body is read
+  once up front into an `ArrayBuffer` specifically so it survives a 307/308
+  replay (see "Request input" below).
 - Relative `Location` values are resolved against the current URL.
 - An https → http downgrade is treated the same as any other origin change:
   `URL.origin` includes the scheme, so the header-stripping rule applies
@@ -131,6 +140,24 @@ Followed faithfully to the Fetch spec, on top of Node's manual-redirect fetch:
 - Redirects beyond `maxRedirects` throw `TooManyRedirectsError`.
 - A redirect status with no `Location` header, or a non-redirect status, ends
   the chain and returns that response.
+
+### Request input
+
+`originScopedFetch(new Request(url, init))` works like `fetch(request)`: url,
+method, headers and body come from the `Request` unless `init` overrides them.
+A `Request`'s body is a `ReadableStream`; it is read into an `ArrayBuffer`
+once, up front (`await request.clone().arrayBuffer()`), rather than passed
+through as a stream. That's what makes a `Request` with a body a true drop-in
+replacement — sending a stream body requires Node's `duplex: 'half'` even on
+the very first hop, and a stream can't be replayed if a 307/308 needs to
+resend it — and it costs nothing extra for a request that never redirects.
+
+A `Request`'s `signal` is forwarded and honoured: aborting it aborts
+`originScopedFetch`, on every hop, and this is covered by a test.
+`credentials`, `keepalive`, `integrity`, and `referrerPolicy` are forwarded
+the same way on a best-effort basis — Node's `fetch` accepts them without
+erroring — but only `signal` propagation is individually tested here. `mode`
+and `cache` are not carried over from a `Request` at all.
 
 ### `res.url` and `res.redirected`
 
@@ -152,11 +179,13 @@ sent.
   header, and travel with the redirect target regardless — this package
   can't and doesn't touch them.
 - **URL userinfo** (`https://user:pass@host/`) is likewise untouched.
-- **Request bodies on 307/308** are resent as-is, including to a
-  cross-origin target, exactly as the Fetch spec requires (the method/body
-  can't be dropped on 307/308 the way headers are). If your body carries a
-  credential, a 307/308 redirect to another origin still sends it. Only
-  *headers* get the origin-scoped treatment.
+- **Request bodies on 307/308 are resent cross-origin unscrubbed**, exactly
+  as the Fetch spec requires (the method/body can't be dropped on 307/308 the
+  way headers are). If your body carries a credential, a 307/308 redirect to
+  another origin still sends it — and so do the headers describing that body
+  (`content-type`, `content-encoding`, `content-language`), deliberately kept
+  even cross-origin so the body isn't mislabeled on arrival. Only headers that
+  don't describe the body get the origin-scoped treatment on 307/308.
 - **Cookies.** Node's `fetch` has no cookie jar; this package doesn't add
   one or invent cookie semantics.
 - **Other HTTP clients.** axios and got are not `fetch` and have their own
