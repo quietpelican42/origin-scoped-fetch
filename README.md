@@ -20,9 +20,9 @@ This matters whenever the redirect target isn't fully trusted: webhook delivery 
 
 The obvious defenses don't hold up:
 
-- **Checking that `Authorization` and `Cookie` are stripped.** They are, by the runtime, already. That's not the gap. The gap is every other header.
-- **Reading `res.redirected` and deciding after the fact.** By the time you can inspect that, `fetch` already made the second request with your headers attached. There's nothing left to prevent.
-- **`redirect: 'manual'` alone.** This stops fetch from following the redirect for you, but now you have to resolve `Location`, decide whether to strip headers, and re-request — which is what this package does, including the method/body degradation rules for 301/302/303/307/308.
+- Checking that `Authorization` and `Cookie` are stripped: they are, by the runtime, already. That is not the gap. The gap is every other header.
+- Reading `res.redirected` and deciding after the fact: by the time you can inspect that, `fetch` already made the second request with your headers attached. There is nothing left to prevent.
+- `redirect: 'manual'` alone: this stops fetch from following the redirect for you, but now you have to resolve `Location`, decide whether to strip headers, and re-request — which is what this package does, including the method/body degradation rules for 301/302/303/307/308.
 
 Measured: `node examples/leak-demo.ts` — server A redirects to server B on a different origin, with `authorization`, `cookie`, and `x-api-key` set on the request:
 
@@ -98,9 +98,9 @@ The built-in cross-origin-safe list is `accept`, `accept-language`, `content-lan
 
 Followed to the Fetch spec, on top of Node's manual-redirect fetch:
 
-- **301, 302 on POST** — method becomes `GET`, body and body-related headers (`content-type`, `content-length`, `content-encoding`) are dropped.
-- **303** — method becomes `GET`, except when the original method was `HEAD`.
-- **307, 308** — method and body are preserved unchanged, including across an origin change. The Fetch spec gives no mechanism to drop the body on 307/308, so it is resent to the new origin exactly as given. The headers that describe that body (`content-type`, `content-encoding`, `content-language`) are kept too, even cross-origin: the body is going there either way, and stripping the label without stripping the body would just relabel it, not protect it. Every other header still gets scoped to the new origin as usual. If the body is a `ReadableStream`, it was already consumed sending the first request and cannot be resent — this throws `UnreplayableRedirectBodyError` rather than silently sending a request with no body or hanging. A `string`, `Buffer`/`TypedArray`, `Blob`, or `FormData` body has no such problem and is resent. A `Request` input's body is read once up front into an `ArrayBuffer` specifically so it survives a 307/308 replay (see Request input above).
+- 301, 302 on POST — method becomes `GET`, body and body-related headers (`content-type`, `content-length`, `content-encoding`) are dropped.
+- 303 — method becomes `GET`, except when the original method was `HEAD`.
+- 307, 308 — method and body are preserved unchanged, including across an origin change. The Fetch spec gives no mechanism to drop the body on 307/308, so it is resent to the new origin exactly as given. The headers that describe that body (`content-type`, `content-encoding`, `content-language`) are kept too, even cross-origin: the body is going there either way, and stripping the label without stripping the body would just relabel it, not protect it. Every other header still gets scoped to the new origin as usual. If the body is a `ReadableStream`, it was already consumed sending the first request and cannot be resent — this throws `UnreplayableRedirectBodyError` rather than silently sending a request with no body or hanging. A `string`, `Buffer`/`TypedArray`, `Blob`, or `FormData` body has no such problem and is resent. A `Request` input's body is read once up front into an `ArrayBuffer` specifically so it survives a 307/308 replay (see Request input above).
 - Relative `Location` values are resolved against the current URL.
 - An https to http downgrade is treated the same as any other origin change: `URL.origin` includes the scheme, so the header-stripping rule applies automatically. There is no separate scheme check.
 - Redirects beyond `maxRedirects` throw `TooManyRedirectsError`.
